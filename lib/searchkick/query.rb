@@ -19,7 +19,7 @@ module Searchkick
         :boost_by, :boost_by_distance, :boost_where, :conversions, :conversions_term, :debug, :emoji, :exclude, :execute, :explain,
         :fields, :highlight, :includes, :index_name, :indices_boost, :limit, :load,
         :match, :misspellings, :offset, :operator, :order, :padding, :page, :per_page, :profile,
-        :request_params, :routing, :select, :similar, :smart_aggs, :suggest, :track, :type, :where]
+        :request_params, :routing, :select, :similar, :smart_aggs, :suggest, :track, :type, :where, :analyzers]
       raise ArgumentError, "unknown keywords: #{unknown_keywords.join(", ")}" if unknown_keywords.any?
 
       term = term.to_s
@@ -306,6 +306,9 @@ module Searchkick
                 shared_options.merge(analyzer: Searchkick.searchkick_search_analyzer),
                 shared_options.merge(analyzer: Searchkick.searchkick_search2_analyzer)
               ]
+              qs.concat options.fetch(:analyzers, []).map { |analyzer|
+                shared_options.merge(analyzer: analyzer)
+              }
               exclude_analyzer = Searchkick.searchkick_search2_analyzer
             elsif field.end_with?(".exact")
               f = field.split(".")[0..-2].join(".")
