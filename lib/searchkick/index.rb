@@ -298,8 +298,8 @@ module Searchkick
 
         scope = scope.select("id").except(:includes, :preload) if async
 
-        scope.find_in_batches batch_size: batch_size do |batch|
-          import_or_update batch, method_name, async
+        scope.find_in_batches batch_size: batch_size do |items|
+          import_or_update items, method_name, async
         end
       else
         each_batch(scope) do |items|
@@ -318,10 +318,14 @@ module Searchkick
       client.indices.analyze(body: {text: text}.merge(options), index: name)["tokens"].map { |t| t["token"] }
     end
 
-    def klass_document_type(klass)
-      @klass_document_type[klass] ||= begin
+    def klass_document_type(klass, ignore_type = false)
+      @klass_document_type[[klass, ignore_type]] ||= begin
         if klass.respond_to?(:document_type)
           klass.document_type
+        elsif !ignore_type && klass.searchkick_klass.searchkick_options[:_type]
+          type = klass.searchkick_klass.searchkick_options[:_type]
+          type = type.call if type.respond_to?(:call)
+          type
         else
           klass.model_name.to_s.underscore
         end
@@ -334,11 +338,11 @@ module Searchkick
       Searchkick.client
     end
 
-    def document_type(record)
+    def document_type(record, ignore_type = false)
       if record.respond_to?(:search_document_type)
         record.search_document_type
       else
-        klass_document_type(record.class)
+        klass_document_type(record.class, ignore_type)
       end
     end
 
@@ -384,6 +388,10 @@ module Searchkick
             end
           end
         end
+      end
+
+      if !source.key?("type") && record.class.searchkick_klass.searchkick_options[:inheritance]
+        source["type"] = document_type(record, true)
       end
 
       cast_big_decimal(source)
@@ -446,7 +454,13 @@ module Searchkick
         # TODO expire Redis key
         primary_key = scope.primary_key
 
-        starting_id = scope.minimum(primary_key)
+        starting_id =
+          begin
+            scope.minimum(primary_key)
+          rescue ActiveRecord::StatementInvalid
+            false
+          end
+
         if starting_id.nil?
           # no records, do nothing
         elsif starting_id.is_a?(Numeric)

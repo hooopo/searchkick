@@ -18,7 +18,7 @@ module Searchkick
       unknown_keywords = options.keys - [:aggs, :body, :body_options, :boost,
         :boost_by, :boost_by_distance, :boost_where, :conversions, :conversions_term, :debug, :emoji, :exclude, :execute, :explain,
         :fields, :highlight, :includes, :index_name, :indices_boost, :limit, :load,
-        :match, :misspellings, :offset, :operator, :order, :padding, :page, :per_page, :profile,
+        :match, :misspellings, :model_includes, :offset, :operator, :order, :padding, :page, :per_page, :profile,
         :request_params, :routing, :select, :similar, :smart_aggs, :suggest, :track, :type, :where, :analyzers]
       raise ArgumentError, "unknown keywords: #{unknown_keywords.join(", ")}" if unknown_keywords.any?
 
@@ -108,6 +108,7 @@ module Searchkick
         padding: @padding,
         load: @load,
         includes: options[:includes],
+        model_includes: options[:model_includes],
         json: !@json.nil?,
         match_suffix: @match_suffix,
         highlighted_fields: @highlighted_fields || [],
@@ -222,12 +223,17 @@ module Searchkick
 
       @json = options[:body]
       if @json
+        ignored_options = options.keys & [:aggs, :boost,
+          :boost_by, :boost_by_distance, :boost_where, :conversions, :conversions_term, :exclude, :explain,
+          :fields, :highlight, :indices_boost, :limit, :match, :misspellings, :offset, :operator, :order,
+          :padding, :page, :per_page, :select, :smart_aggs, :suggest, :where]
+        warn "The body option replaces the entire body, so the following options are ignored: #{ignored_options.join(", ")}" if ignored_options.any?
         payload = @json
       else
         if options[:similar]
           payload = {
             more_like_this: {
-              like_text: term,
+              like: term,
               min_doc_freq: 1,
               min_term_freq: 1,
               analyzer: Searchkick.searchkick_search2_analyzer
@@ -301,7 +307,7 @@ module Searchkick
             exclude_field = field
 
             if field == "_all" || field.end_with?(".analyzed")
-              shared_options[:cutoff_frequency] = 0.001 unless operator == "and" || misspellings == false
+              shared_options[:cutoff_frequency] = 0.001 unless operator.to_s == "and" || misspellings == false
               qs.concat [
                 shared_options.merge(analyzer: Searchkick.searchkick_search_analyzer),
                 shared_options.merge(analyzer: Searchkick.searchkick_search2_analyzer)
@@ -446,8 +452,14 @@ module Searchkick
         # indices_boost
         set_boost_by_indices(payload)
 
+        # type when inheritance
+        where = (options[:where] || {}).dup
+        if searchkick_options[:inheritance] && (options[:type] || (klass != searchkick_klass && searchkick_index))
+          where[:type] = [options[:type] || klass].flatten.map { |v| searchkick_index.klass_document_type(v, true) }
+        end
+
         # filters
-        filters = where_filters(options[:where])
+        filters = where_filters(where)
         set_filters(payload, filters) if filters.any?
 
         # aggregations
@@ -463,8 +475,7 @@ module Searchkick
         payload[:timeout] ||= "#{Searchkick.search_timeout + 1}s"
 
         # An empty array will cause only the _id and _type for each hit to be returned
-        # doc for :select - http://www.elasticsearch.org/guide/reference/api/search/fields/
-        # doc for :select_v2 - https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-source-filtering.html
+        # https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-source-filtering.html
         if options[:select]
           if options[:select] == []
             # intuitively [] makes sense to return no fields, but ES by default returns all fields
@@ -475,14 +486,15 @@ module Searchkick
         elsif load
           payload[:_source] = false
         end
-
-        if options[:type] || (klass != searchkick_klass && searchkick_index)
-          @type = [options[:type] || klass].flatten.map { |v| searchkick_index.klass_document_type(v) }
-        end
-
-        # routing
-        @routing = options[:routing] if options[:routing]
       end
+
+      # type
+      if !searchkick_options[:inheritance] && (options[:type] || (klass != searchkick_klass && searchkick_index))
+        @type = [options[:type] || klass].flatten.map { |v| searchkick_index.klass_document_type(v) }
+      end
+
+      # routing
+      @routing = options[:routing] if options[:routing]
 
       # merge more body options
       payload = payload.deep_merge(options[:body_options]) if options[:body_options]
@@ -512,6 +524,8 @@ module Searchkick
           ["_all"]
         elsif all && default_match == :phrase
           ["_all.phrase"]
+        elsif term == "*"
+          []
         else
           raise ArgumentError, "Must specify fields to search"
         end
@@ -879,13 +893,21 @@ module Searchkick
           }
         }
 
-        {
-          filter: {
+        if value[:missing]
+          if below50?
+            raise ArgumentError, "The missing option for boost_by is not supported in Elasticsearch < 5"
+          else
+            script_score[:field_value_factor][:missing] = value[:missing].to_f
+          end
+        else
+          script_score[:filter] = {
             exists: {
               field: field
             }
           }
-        }.merge(script_score)
+        end
+
+        script_score
       end
     end
 
