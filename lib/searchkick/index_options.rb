@@ -315,7 +315,17 @@ module Searchkick
         mappings = {
           _default_: {
             properties: mapping,
-            _routing: routing
+            _routing: routing,
+            # https://gist.github.com/kimchy/2898285
+            dynamic_templates: [
+              {
+                string_template: {
+                  match: "*",
+                  match_mapping_type: "string",
+                  mapping: multi_field
+                }
+              }
+            ]
           }
         }
 
